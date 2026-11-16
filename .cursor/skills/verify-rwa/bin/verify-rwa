@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# Launch, check, drive, and stop one Cypress Real World App verification run.
+# Parallel runs are refused. Cleanup never deletes artifacts/verify-rwa/<feature>/.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+RUN_DIR="$ROOT/artifacts/verify-rwa/run"
+PID_FILE="$RUN_DIR/pid"
+MUTATED_FILE="$RUN_DIR/mutated"
+FRONTEND_URL="http://localhost:3000"
+API_URL="http://localhost:3001"
+FEATURES="sign-in send-payment transaction-feed notifications bank-accounts"
+
+die() {
+  echo "verify-rwa: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat << EOF
+Usage: .cursor/skills/verify-rwa/bin/verify-rwa <command>
+
+  launch              Start yarn dev for this run. Refuses if 3000 or 3001 is taken.
+  doctor              Read-only check that this run's app is up, ours, and seed auth matches.
+  drive <feature>     Seed, then run the Cypress recipe for one mapped feature.
+                      Features: ${FEATURES}
+                      Optional second argument is the Cypress browser (default: electron).
+  cleanup             Stop only the processes launch started and restore data/database.json.
+                      Does not delete artifacts/verify-rwa/.
+EOF
+}
+
+require_toolchain() {
+  local node_major yarn_major
+  command -v node >/dev/null 2>&1 || die "node is not on PATH"
+  command -v yarn >/dev/null 2>&1 || die "yarn is not on PATH"
+  node_major="$(node -p "process.versions.node.split('.')[0]")"
+  if [[ "$node_major" != "22" && "$node_major" != "24" ]]; then
+    die "Node $(node -v) is outside package.json engines (^22.0.0 || ^24.0.0)"
+  fi
+  yarn_major="$(yarn --version | cut -d. -f1)"
+  if [[ "$yarn_major" != "1" ]]; then
+    die "Yarn $(yarn --version) is not Classic 1.x. This repo is not compatible with Yarn 2+."
+  fi
+  if [[ ! -d "$ROOT/node_modules/cypress" ]]; then
+    echo "verify-rwa: node_modules is missing. Running yarn install --frozen-lockfile"
+    (cd "$ROOT" && yarn install --frozen-lockfile)
+  fi
+}
+
+listener_pids() {
+  python3 - "$1" << 'PY'
+import os, sys
+port = int(sys.argv[1])
+hexport = f"{port:04X}"
+inodes = set()
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 10:
+            continue
+        local, state, inode = parts[1], parts[3], parts[9]
+        if local.rsplit(":", 1)[-1].upper() == hexport and state == "0A":
+            inodes.add(inode)
+pids = []
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    fd_dir = f"/proc/{pid}/fd"
+    try:
+        fds = os.listdir(fd_dir)
+    except OSError:
+        continue
+    for fd in fds:
+        try:
+            target = os.readlink(f"{fd_dir}/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target[8:-1] in inodes:
+            pids.append(pid)
+print(" ".join(sorted(set(pids), key=int)))
+PY
+}
+
+# Print descendant pids of $1, children before parents is not required; caller kills them.
+descendant_pids() {
+  python3 - "$1" << 'PY'
+import os, sys
+root = sys.argv[1]
+children = {}
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    try:
+        stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+    except OSError:
+        continue
+    rparen = stat.rfind(")")
+    fields = stat[rparen + 2 :].split()
+    if len(fields) < 2:
+        continue
+    children.setdefault(fields[1], []).append(pid)
+out = []
+stack = [root]
+seen = {root}
+while stack:
+    cur = stack.pop()
+    for child in children.get(cur, []):
+        if child in seen:
+            continue
+        seen.add(child)
+        out.append(child)
+        stack.append(child)
+print(" ".join(out))
+PY
+}
+
+pid_is_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+launch_pid() {
+  if [[ -f "$PID_FILE" ]]; then
+    cat "$PID_FILE"
+  fi
+}
+
+assert_ports_owned_by_launch() {
+  local pid="$1"
+  local port listeners
+  for port in 3000 3001; do
+    listeners="$(listener_pids "$port")"
+    if [[ -z "$listeners" ]]; then
+      echo "verify-rwa: nothing is listening on ${port}" >&2
+      return 1
+    fi
+    python3 - "$pid" "$listeners" "$port" << 'PY'
+import os, sys
+launch, listeners, port = sys.argv[1], sys.argv[2].split(), sys.argv[3]
+
+def ancestors(pid):
+    seen = []
+    while pid and pid not in seen and pid != "0":
+        seen.append(pid)
+        try:
+            stat = open(f"/proc/{pid}/stat", encoding="utf-8").read()
+        except OSError:
+            break
+        rparen = stat.rfind(")")
+        fields = stat[rparen + 2 :].split()
+        if len(fields) < 2:
+            break
+        pid = fields[1]
+    return seen
+
+bad = [pid for pid in listeners if launch not in ancestors(pid)]
+if bad:
+    print(
+        f"verify-rwa: port {port} is held by {bad}, not by launch pid {launch}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+  done
+}
+
+frontend_is_dev_server() {
+  local html
+  html="$(curl -fsS "$FRONTEND_URL/" 2>/dev/null)" || return 1
+  grep -q "<title>Cypress Real World App</title>" <<< "$html" || return 1
+  grep -q 'src="/src/index.tsx"' <<< "$html" || return 1
+}
+
+api_is_up() {
+  local body code
+  body="$(curl -fsS "$API_URL/" 2>/dev/null)" || return 1
+  [[ "$body" == "Cypress Realworld App - backend" ]] || return 1
+  code="$(curl -sS -o "$RUN_DIR/graphql-doctor.json" -w "%{http_code}" \
+    -X POST "$API_URL/graphql" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ __typename }"}' 2>/dev/null)" || return 1
+  [[ "$code" == "200" ]]
+}
+
+auth_seed_ok() {
+  (cd "$ROOT" && node << 'NODE'
+const fs = require("fs");
+const bcrypt = require("bcryptjs");
+const db = JSON.parse(fs.readFileSync("data/database.json", "utf8"));
+const user = db.users.find((entry) => entry.username === "Heath93");
+if (!user) {
+  console.error("verify-rwa: Heath93 is missing from data/database.json");
+  process.exit(1);
+}
+if (!bcrypt.compareSync("s3cret", user.password)) {
+  console.error("verify-rwa: Heath93 password hash does not match seed password s3cret");
+  process.exit(1);
+}
+if (db.users.length !== 5) {
+  console.error(`verify-rwa: expected 5 seed users, found ${db.users.length}`);
+  process.exit(1);
+}
+const required = ["Arvilla_Hegmann", "Dina20", "Reyes.Osinski", "Judah_Dietrich50"];
+for (const username of required) {
+  if (!db.users.some((entry) => entry.username === username)) {
+    console.error(`verify-rwa: seed user ${username} is missing`);
+    process.exit(1);
+  }
+}
+console.log(`auth-seed-ok Heath93 ${user.id} users=${db.users.length}`);
+NODE
+  )
+}
+
+cmd_doctor() {
+  local pid
+  pid="$(launch_pid || true)"
+  if [[ -z "$pid" ]]; then
+    die "no launch pid at ${PID_FILE}. Refusing to doctor an app this run did not start."
+  fi
+  if ! pid_is_alive "$pid"; then
+    die "launch pid ${pid} is not running. Refusing to doctor a different server on :3000."
+  fi
+  assert_ports_owned_by_launch "$pid"
+  frontend_is_dev_server || die "frontend is not the Vite dev server for Cypress Real World App (${FRONTEND_URL})"
+  api_is_up || die "API is not responding as Cypress Realworld App - backend (${API_URL})"
+  auth_seed_ok
+  echo "doctor-ok pid=${pid} frontend=${FRONTEND_URL} api=${API_URL} build=vite-dev"
+}
+
+stop_launch_tree() {
+  local pid="$1"
+  local child
+  if ! pid_is_alive "$pid"; then
+    return 0
+  fi
+  local cmdline
+  cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  if [[ "$cmdline" != *yarn* && "$cmdline" != *node* && "$cmdline" != *concurrently* ]]; then
+    echo "verify-rwa: pid ${pid} cmdline is not the dev server (${cmdline}); not killing it" >&2
+    return 0
+  fi
+  local victims
+  victims="$(descendant_pids "$pid") $pid"
+  # Shell out one signal to the recorded process group (setsid made pid the leader)
+  # and to each descendant. Never match by process name.
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  for child in $victims; do
+    kill -TERM "$child" 2>/dev/null || true
+  done
+  local i
+  for i in $(seq 1 20); do
+    pid_is_alive "$pid" || break
+    sleep 0.5
+  done
+  if pid_is_alive "$pid"; then
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+    for child in $victims; do
+      kill -KILL "$child" 2>/dev/null || true
+    done
+  fi
+}
+
+cmd_cleanup() {
+  local pid=""
+  if [[ -f "$PID_FILE" ]]; then
+    pid="$(cat "$PID_FILE")"
+    stop_launch_tree "$pid"
+    rm -f "$PID_FILE"
+  else
+    echo "verify-rwa: no pid file. No dev server was recorded for this run."
+  fi
+  if [[ -f "$MUTATED_FILE" ]]; then
+    cp "$ROOT/data/database-seed.json" "$ROOT/data/database.json"
+    rm -f "$MUTATED_FILE"
+    echo "verify-rwa: restored data/database.json from data/database-seed.json"
+  fi
+  echo "verify-rwa: cleanup finished. Evidence under ${ROOT}/artifacts/verify-rwa/<feature>/ was kept."
+}
+
+cmd_launch() {
+  require_toolchain
+  mkdir -p "$RUN_DIR"
+  local existing
+  existing="$(launch_pid || true)"
+  if [[ -n "$existing" ]] && pid_is_alive "$existing"; then
+    die "a verification server is already running as pid ${existing}. Parallel runs share ports 3000/3001 and data/database.json, so this launch is refused."
+  fi
+  rm -f "$PID_FILE"
+  local p3000 p3001
+  p3000="$(listener_pids 3000)"
+  p3001="$(listener_pids 3001)"
+  if [[ -n "$p3000" || -n "$p3001" ]]; then
+    die "port 3000 is [${p3000:-free}] and port 3001 is [${p3001:-free}]. Parallel runs cannot be isolated: vite.config.ts fixes the frontend at 3000, the API defaults to 3001 (and detect-port will silently move it), and backend/database.ts always uses data/database.json. This command will not kill those processes."
+  fi
+  echo "verify-rwa: starting yarn dev (predev copies data/database-seed.json onto data/database.json)"
+  (
+    cd "$ROOT"
+    setsid yarn dev >"$RUN_DIR/dev.log" 2>&1 < /dev/null &
+    echo $! >"$PID_FILE"
+  )
+  local pid i
+  pid="$(cat "$PID_FILE")"
+  echo "verify-rwa: launch pid ${pid}. log ${RUN_DIR}/dev.log"
+  for i in $(seq 1 60); do
+    if frontend_is_dev_server && api_is_up; then
+      cmd_doctor
+      return 0
+    fi
+    if ! pid_is_alive "$pid"; then
+      echo "verify-rwa: yarn dev exited before it was usable. Last log lines:" >&2
+      tail -n 40 "$RUN_DIR/dev.log" >&2 || true
+      die "launch failed"
+    fi
+    sleep 1
+  done
+  echo "verify-rwa: timed out after 60s. Last log lines:" >&2
+  tail -n 40 "$RUN_DIR/dev.log" >&2 || true
+  stop_launch_tree "$pid"
+  rm -f "$PID_FILE"
+  die "frontend and API were not usable within 60s"
+}
+
+cmd_drive() {
+  local feature="${1:-}"
+  local browser="${2:-electron}"
+  local spec stamp evidence code
+  case " $FEATURES " in
+    *" $feature "*) ;;
+    *) die "drive requires one of: ${FEATURES}" ;;
+  esac
+  [[ "$browser" == "electron" || "$browser" == "chrome" ]] || die "browser must be electron or chrome"
+  require_toolchain
+  cmd_doctor
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  evidence="$ROOT/artifacts/verify-rwa/${feature}/${stamp}"
+  spec=".cursor/skills/verify-rwa/specs/${feature}.cy.ts"
+  mkdir -p "$evidence"
+  touch "$MUTATED_FILE"
+  echo "verify-rwa: POST ${API_URL}/testData/seed"
+  curl -fsS -X POST "${API_URL}/testData/seed" -o "$evidence/seed.body" -w "%{http_code}\n" >"$evidence/seed.status"
+  [[ "$(cat "$evidence/seed.status")" == "200" ]] || die "seed reset returned $(cat "$evidence/seed.status")"
+  {
+    echo "cd ${ROOT}"
+    echo ".cursor/skills/verify-rwa/bin/verify-rwa doctor"
+    echo "curl -fsS -X POST ${API_URL}/testData/seed"
+    echo "VERIFY_RWA_EVIDENCE=${evidence} yarn cypress run --browser ${browser} --config-file .cursor/skills/verify-rwa/cypress.config.ts --spec ${spec}"
+  } >"$evidence/commands.txt"
+  git -C "$ROOT" rev-parse HEAD >"$evidence/git-sha.txt"
+  echo "verify-rwa: driving ${feature} with Cypress (${browser}). Evidence: ${evidence}"
+  set +e
+  (
+    cd "$ROOT"
+    VERIFY_RWA_EVIDENCE="$evidence" yarn cypress run \
+      --browser "$browser" \
+      --config-file .cursor/skills/verify-rwa/cypress.config.ts \
+      --spec "$spec"
+  )
+  code=$?
+  set -e
+  echo "$code" >"$evidence/cypress-exit-code.txt"
+  echo "verify-rwa: cypress exit ${code}. Evidence kept at ${evidence}"
+  return "$code"
+}
+
+main() {
+  local command="${1:-}"
+  case "$command" in
+    launch) cmd_launch ;;
+    doctor) cmd_doctor ;;
+    drive)
+      shift
+      cmd_drive "$@"
+      ;;
+    cleanup) cmd_cleanup ;;
+    ""|-h|--help|help) usage ;;
+    *)
+      usage >&2
+      die "unknown command: ${command}"
+      ;;
+  esac
+}
+
+main "$@"
