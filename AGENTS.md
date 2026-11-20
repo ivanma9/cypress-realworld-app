@@ -34,7 +34,9 @@ Run these from the repo root. API and end-to-end need `yarn dev` already up; `pr
 
 The default Cypress browser is Electron headless. `yarn test:headless` runs every file under `cypress/tests/**/*.spec.*` (API, UI, demo, and auth providers). CI uses the UI spec above for e2e so API is not run twice.
 
-CI is `.github/workflows/verify.yml`. It runs on pull requests into `develop` and on pushes to `develop`. It runs the same commands, in three jobs: `checks` (install, types, lint, unit), `api-e2e` (`yarn dev`, then API, then UI e2e), and `component`. It does not record to Cypress Cloud and needs no secrets.
+CI for these commands is `.github/workflows/verify.yml` (pull requests into `develop`, and pushes to `develop`). Jobs: `checks` (install, types, lint, unit), `api-e2e`, and `component`. `api-e2e` runs `yarn build:ci`, `yarn db:seed:dev`, and `yarn start:ci`, then `yarn test:api` and the UI e2e command. It uses `yarn start:ci` instead of `yarn dev` because Vite's dev server was not reachable on port 3000 inside the `cypress/browsers` image (`wait-on` timed out there while the API answered). `yarn start:ci` is the Express server `.github/workflows/main.yml` already starts. Locally, keep using `yarn dev` for these same test commands. Verify does not record to Cypress Cloud and needs no secrets.
+
+`.github/workflows/main.yml` (Cypress Tests) still runs on every push, including pull request branches. If `CYPRESS_RECORD_KEY` is set, it records to Cypress Cloud and splits each browser across 5 machines. If the key is absent, Chrome, Chrome mobile, Firefox, and Firefox mobile each run once, with recording and parallel off, so the specs actually execute. Do not set `record` or `parallel` without that secret. `--group` is sent only when recording, because Cypress rejects the flag otherwise.
 
 ## User-facing proof
 

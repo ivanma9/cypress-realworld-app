@@ -1,5 +1,10 @@
 name: Cypress Tests
 
+# Recording and --parallel need Cypress Cloud (CYPRESS_RECORD_KEY). This fork
+# does not have that secret, and Cypress exits before running specs when those
+# flags are set without it. Record only when the key is present. Otherwise each
+# browser runs once, on one machine, with no Cloud upload.
+
 on:
   push:
     branches-ignore:
@@ -11,9 +16,27 @@ jobs:
     container:
       image: cypress/browsers:22.20.0
       options: --user 1001
+    outputs:
+      record: ${{ steps.cloud.outputs.record }}
+      containers: ${{ steps.cloud.outputs.containers }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Cypress Cloud recording
+        id: cloud
+        env:
+          CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
+        run: |
+          if [ -n "$CYPRESS_RECORD_KEY" ]; then
+            echo "record=true" >> "$GITHUB_OUTPUT"
+            echo "containers=[1, 2, 3, 4, 5]" >> "$GITHUB_OUTPUT"
+            echo "CYPRESS_RECORD_KEY is set. Recording to Cypress Cloud and splitting each browser across 5 machines."
+          else
+            echo "record=false" >> "$GITHUB_OUTPUT"
+            echo "containers=[1]" >> "$GITHUB_OUTPUT"
+            echo "CYPRESS_RECORD_KEY is not set. Each browser runs once, without --record or --parallel."
+          fi
 
       - name: Cypress install
         uses: cypress-io/github-action@v6
@@ -49,8 +72,9 @@ jobs:
       # https://github.com/cypress-io/github-action/issues/48
       fail-fast: false
       matrix:
-        # run copies of the current job in parallel
-        containers: [1, 2, 3, 4, 5]
+        # Five machines only when Cypress Cloud can balance --parallel.
+        # Without a record key this is a single machine per browser.
+        containers: ${{ fromJSON(needs.install.outputs.containers) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,9 +99,9 @@ jobs:
           wait-on: "http://localhost:3000, http://localhost:3001"
           wait-on-timeout: 120
           browser: chrome
-          record: true
-          parallel: true
-          group: "UI - Chrome"
+          record: ${{ needs.install.outputs.record == 'true' }}
+          parallel: ${{ needs.install.outputs.record == 'true' }}
+          group: ${{ needs.install.outputs.record == 'true' && 'UI - Chrome' || '' }}
           spec: cypress/tests/ui/*
           config-file: cypress.config.ts
         env:
@@ -102,8 +126,9 @@ jobs:
       # https://github.com/cypress-io/github-action/issues/48
       fail-fast: false
       matrix:
-        # run copies of the current job in parallel
-        containers: [1, 2, 3, 4, 5]
+        # Five machines only when Cypress Cloud can balance --parallel.
+        # Without a record key this is a single machine per browser.
+        containers: ${{ fromJSON(needs.install.outputs.containers) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -122,9 +147,9 @@ jobs:
           wait-on: "http://localhost:3000, http://localhost:3001"
           wait-on-timeout: 120
           browser: chrome
-          record: true
-          parallel: true
-          group: "UI - Chrome - Mobile"
+          record: ${{ needs.install.outputs.record == 'true' }}
+          parallel: ${{ needs.install.outputs.record == 'true' }}
+          group: ${{ needs.install.outputs.record == 'true' && 'UI - Chrome - Mobile' || '' }}
           spec: cypress/tests/ui/*
           config-file: cypress.config.ts
         env:
@@ -148,8 +173,9 @@ jobs:
       # https://github.com/cypress-io/github-action/issues/48
       fail-fast: false
       matrix:
-        # run copies of the current job in parallel
-        containers: [1, 2, 3, 4, 5]
+        # Five machines only when Cypress Cloud can balance --parallel.
+        # Without a record key this is a single machine per browser.
+        containers: ${{ fromJSON(needs.install.outputs.containers) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -167,9 +193,9 @@ jobs:
           wait-on: "http://localhost:3000, http://localhost:3001"
           wait-on-timeout: 120
           browser: firefox
-          record: true
-          parallel: true
-          group: "UI - Firefox"
+          record: ${{ needs.install.outputs.record == 'true' }}
+          parallel: ${{ needs.install.outputs.record == 'true' }}
+          group: ${{ needs.install.outputs.record == 'true' && 'UI - Firefox' || '' }}
           spec: cypress/tests/ui/*
           config-file: cypress.config.ts
         env:
@@ -193,8 +219,9 @@ jobs:
       # https://github.com/cypress-io/github-action/issues/48
       fail-fast: false
       matrix:
-        # run copies of the current job in parallel
-        containers: [1, 2, 3, 4, 5]
+        # Five machines only when Cypress Cloud can balance --parallel.
+        # Without a record key this is a single machine per browser.
+        containers: ${{ fromJSON(needs.install.outputs.containers) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -213,9 +240,9 @@ jobs:
           wait-on: "http://localhost:3000, http://localhost:3001"
           wait-on-timeout: 120
           browser: firefox
-          record: true
-          parallel: true
-          group: "UI - Firefox - Mobile"
+          record: ${{ needs.install.outputs.record == 'true' }}
+          parallel: ${{ needs.install.outputs.record == 'true' }}
+          group: ${{ needs.install.outputs.record == 'true' && 'UI - Firefox - Mobile' || '' }}
           spec: cypress/tests/ui/*
           config-file: cypress.config.ts
         env:

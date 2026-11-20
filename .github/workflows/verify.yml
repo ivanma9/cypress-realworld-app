@@ -57,16 +57,24 @@ jobs:
       - name: Install
         run: yarn install --frozen-lockfile
 
+      - name: Build CI server
+        run: yarn build:ci
+
+      # yarn dev's Vite server binds "localhost" to one address family. In this
+      # image, wait-on reached the API and timed out on port 3000. yarn start:ci
+      # is the Express server .github/workflows/main.yml already uses, and it
+      # listens on all interfaces. The test commands below are unchanged.
       - name: API and UI e2e (Electron)
         run: |
           set -eu
+          yarn db:seed:dev
           log="${RUNNER_TEMP:-/tmp}/dev.log"
-          setsid yarn dev >"$log" 2>&1 &
+          setsid yarn start:ci >"$log" 2>&1 &
           dev_pid=$!
           cleanup() {
             status=$?
             if [ "$status" -ne 0 ]; then
-              echo "----- yarn dev (tail) -----"
+              echo "----- yarn start:ci (tail) -----"
               tail -n 120 "$log" || true
             fi
             kill -TERM -- "-${dev_pid}" 2>/dev/null || true
