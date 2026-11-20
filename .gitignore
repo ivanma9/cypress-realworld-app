@@ -6,6 +6,9 @@
 # testing
 /coverage
 
+# Verification skill evidence and the live-run lock. Cleanup keeps this tree.
+/artifacts
+
 # production
 /build
 
