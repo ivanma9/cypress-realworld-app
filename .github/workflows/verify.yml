@@ -1,0 +1,126 @@
+# Trustworthy checks for this fork. Same commands as AGENTS.md.
+# No Cypress Cloud recording and no secrets.
+#
+# The component job is expected to fail on current develop: TransactionDateRangeFilter
+# "should render a defined date range filter" renders "Date: undefined".
+# Do not skip that test. See AGENTS.md and BASELINE.md.
+
+name: Verify
+
+on:
+  pull_request:
+    branches:
+      - develop
+  push:
+    branches:
+      - develop
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Types, lint, and unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: cypress/browsers:22.20.0
+      options: --user 1001
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Types
+        run: yarn types
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Unit
+        run: yarn test:unit:ci
+
+  api-e2e:
+    name: API and e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: cypress/browsers:22.20.0
+      options: --user 1001
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Build CI server
+        run: yarn build:ci
+
+      # yarn dev's Vite server binds "localhost" to one address family. In this
+      # image, wait-on reached the API and timed out on port 3000. yarn start:ci
+      # is the Express server .github/workflows/main.yml already uses, and it
+      # listens on all interfaces. The test commands below are unchanged.
+      - name: API and UI e2e (Electron)
+        run: |
+          set -eu
+          yarn db:seed:dev
+          log="${RUNNER_TEMP:-/tmp}/dev.log"
+          setsid yarn start:ci >"$log" 2>&1 &
+          dev_pid=$!
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "----- yarn start:ci (tail) -----"
+              tail -n 120 "$log" || true
+            fi
+            kill -TERM -- "-${dev_pid}" 2>/dev/null || true
+            sleep 1
+            kill -KILL -- "-${dev_pid}" 2>/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          yarn test:api
+          yarn cypress:run --spec 'cypress/tests/ui/*'
+
+      - name: Upload Cypress failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-api-e2e
+          path: |
+            cypress/screenshots
+            cypress/videos
+          if-no-files-found: ignore
+
+  component:
+    name: Component
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: cypress/browsers:22.20.0
+      options: --user 1001
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      # Expected red until TransactionDateRangeFilter stops rendering "Date: undefined".
+      # The spec is not skipped.
+      - name: Component tests
+        run: yarn test:component:ci
+
+      - name: Upload Cypress failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-component
+          path: |
+            cypress/screenshots
+            cypress/videos
+          if-no-files-found: ignore
