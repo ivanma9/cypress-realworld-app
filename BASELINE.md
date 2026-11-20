@@ -82,7 +82,9 @@ Component specs: `TransactionsContainer.cy.tsx` 4 passed, `AlertBar.cy.tsx` 4 pa
 
 `yarn lint` is `eslint && prettier --check "**/**.{ts,js,tsx}" "*.{json,md,yml}"`. ESLint finished clean and Prettier reported "All matched files use Prettier code style!".
 
-## Known failure
+## Resolved failure
+
+Recorded against `0729f68`. Fixed later: the date chip renders the formatted range from the active date filters, including when a feed tab switch remounts the filter. The historical counts below are from that baseline run, when the component suite still failed.
 
 ### Component: defined date-range chip renders `Date: undefined`
 
@@ -95,7 +97,9 @@ Component specs: `TransactionsContainer.cy.tsx` 4 passed, `AlertBar.cy.tsx` 4 pa
 - Actual: the chip text is `Date: undefined`
 - Classification: application bug
 
-`TransactionDateRangeFilter` treats `dateRangeFilters` as active when `hasDateQueryFields` is true, and then labels the chip from `calendarValue`. That state is created with `useState(null)` and is only set in `onCalendarSelect`, after a calendar pick. The mounted `dateRangeStart` / `dateRangeEnd` props are never copied into `calendarValue`, so `dateRangeLabel(null)` contributes the string `undefined`. The failure screenshot shows the chip reading `Date: undefined`. The VM timezone was UTC; the chip is missing the range, which is a logic gap in the component.
+`TransactionDateRangeFilter` treated `dateRangeFilters` as active when `hasDateQueryFields` was true, and then labeled the chip from `calendarValue`. That state was created with `useState(null)` and was only set in `onCalendarSelect`, after a calendar pick. The mounted `dateRangeStart` / `dateRangeEnd` props were never copied into `calendarValue`, so `dateRangeLabel(null)` contributed the string `undefined`. The failure screenshot shows the chip reading `Date: undefined`. The VM timezone was UTC; the chip was missing the range, which was a logic gap in the component.
+
+The chip label now comes from the active `dateRangeFilters` query. Those ISO strings are turned back into the calendar dates that were picked, so a fresh mount shows `Jan, 1 2018` (and the formatted end date) instead of `undefined`. Switching Everyone / Friends / Mine remounts the filter and keeps the same formatted range. `should render a defined date range filter` covers a mount with the query already set. `keeps the formatted date range when switching feeds remounts the filter` covers the tab switch.
 
 `SignInForm.cy.tsx` also logged React warnings about SVG `stop-color` and `stop-opacity` on `SvgCypressLogo`. That spec passed.
 
@@ -129,4 +133,4 @@ Twelve `it()` blocks stay inside those guards (Auth0 2, Okta 4, Cognito 4, Googl
 - Production-build UI path. CI runs `yarn build:ci` and then `yarn start:ci` (`scripts/testServer.ts` plus the API). This baseline served the app with `yarn dev` (Vite dev server plus the API), which is the README path. `yarn build` and `yarn build:ci` were not run.
 - Coverage: `yarn dev:coverage` and `yarn cypress:run --env coverage=true`.
 - Third-party auth app modes: `yarn dev:auth0`, `yarn dev:okta`, `yarn dev:cognito`, `yarn dev:google`.
-- API, component, demo, and auth-provider specs on Chrome. UI on Chrome matched the Electron UI result (58 passed). The component failure is the chip text `Date: undefined`, which does not depend on the browser.
+- API, component, demo, and auth-provider specs on Chrome. UI on Chrome matched the Electron UI result (58 passed). The component failure recorded above was the chip text `Date: undefined`, which does not depend on the browser. That failure is fixed; see Resolved failure.
