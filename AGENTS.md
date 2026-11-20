@@ -57,6 +57,6 @@ Do not launch `verify-rwa` while `yarn dev` or another drive is already running.
 - One scoped task per PR. Open it against `develop`. Fill in every section of `.github/pull_request_template.md`.
 - Never weaken, skip, delete, or loosen a test to make it pass. Fix the code or report the failure.
 - Do not run two app instances at once.
-- Known failure, until it is fixed: `yarn test:component:ci` exits 1. Spec `src/components/TransactionDateRangeFilter.cy.tsx`, test `should render a defined date range filter`. The chip `[data-test='transaction-list-filter-date-range-button']` renders `Date: undefined` instead of the formatted range. That is an application bug (see `BASELINE.md`). Leave the test failing. Do not skip it. The CI `component` job stays red until the bug is fixed.
+- The date-range chip bug recorded in `BASELINE.md` is fixed. `yarn test:component:ci` includes `src/components/TransactionDateRangeFilter.cy.tsx` test `should render a defined date range filter`: the chip `[data-test='transaction-list-filter-date-range-button']` shows the formatted range (for example `Jan, 1 2018`), including after a feed tab remounts the filter. Do not skip that test. The CI `component` job should pass.
 
 CI does not cover Firefox, mobile viewports, Percy, Cypress Cloud, third-party auth specs, or `verify-rwa`. `BASELINE.md` lists those gaps.

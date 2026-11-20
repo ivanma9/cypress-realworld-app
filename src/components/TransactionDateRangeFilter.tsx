@@ -7,7 +7,11 @@ import Calendar from "react-calendar";
 
 import "react-calendar/dist/Calendar.css";
 import { TransactionDateRangePayload, Value, ValuePiece } from "../models";
-import { hasDateQueryFields, localDateToUTCISOString } from "../utils/transactionUtils";
+import {
+  hasDateQueryFields,
+  isoStringToLocalDateFull,
+  localDateToUTCISOString,
+} from "../utils/transactionUtils";
 
 const PREFIX = "TransactionListDateRangeFilter";
 
@@ -28,6 +32,21 @@ const Root = styled("div")(({ theme }) => ({
 
 const { indigo } = colors;
 
+// The chip stays mounted only for the current feed route. Tab switches remount it,
+// so the label has to come from the active query rather than calendar state.
+function calendarValueFromFilters(dateRangeFilters: TransactionDateRangePayload): Value {
+  if (!dateRangeFilters || !hasDateQueryFields(dateRangeFilters)) {
+    return null;
+  }
+
+  const { dateRangeStart, dateRangeEnd } = dateRangeFilters;
+  if (!dateRangeStart || !dateRangeEnd) {
+    return null;
+  }
+
+  return [isoStringToLocalDateFull(dateRangeStart), isoStringToLocalDateFull(dateRangeEnd)];
+}
+
 export type TransactionListDateRangeFilterProps = {
   filterDateRange: Function;
   dateRangeFilters: TransactionDateRangePayload;
@@ -42,7 +61,7 @@ const TransactionListDateRangeFilter: React.FC<TransactionListDateRangeFilterPro
   const theme = useTheme();
   const xsBreakpoint = useMediaQuery(theme.breakpoints.only("xs"));
   const queryHasDateFields = dateRangeFilters && hasDateQueryFields(dateRangeFilters);
-  const [calendarValue, setCalendarValue] = useState<Value>(null);
+  const selectedRange = calendarValueFromFilters(dateRangeFilters);
 
   const [dateRangeAnchorEl, setDateRangeAnchorEl] = React.useState<HTMLDivElement | null>(null);
 
@@ -53,7 +72,6 @@ const TransactionListDateRangeFilter: React.FC<TransactionListDateRangeFilterPro
         dateRangeStart: localDateToUTCISOString(rangeStart),
         dateRangeEnd: localDateToUTCISOString(rangeEnd),
       };
-      setCalendarValue(val);
       filterDateRange(calValue);
       setDateRangeAnchorEl(null);
     }
@@ -101,10 +119,9 @@ const TransactionListDateRangeFilter: React.FC<TransactionListDateRangeFilterPro
           variant="outlined"
           onClick={handleDateRangeClick}
           data-test="transaction-list-filter-date-range-button"
-          label={`Date: ${dateRangeLabel(calendarValue)}`}
+          label={`Date: ${dateRangeLabel(selectedRange)}`}
           deleteIcon={<CancelIcon data-test="transaction-list-filter-date-clear-button" />}
           onDelete={() => {
-            setCalendarValue(null);
             resetDateRange();
           }}
         />
@@ -130,7 +147,7 @@ const TransactionListDateRangeFilter: React.FC<TransactionListDateRangeFilterPro
             xsBreakpoint={xsBreakpoint}
             color={indigo}
             dataTest="transaction-list-filter-date-range"
-            defaultValue={calendarValue}
+            defaultValue={selectedRange}
           />
         </Popover>
       )}
@@ -150,7 +167,7 @@ const TransactionListDateRangeFilter: React.FC<TransactionListDateRangeFilterPro
             xsBreakpoint={xsBreakpoint}
             color={indigo}
             dataTest="transaction-list-filter-date-range"
-            defaultValue={calendarValue}
+            defaultValue={selectedRange}
           />
         </Drawer>
       )}
